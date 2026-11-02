@@ -1,0 +1,539 @@
+---
+title: "Homework 4"
+subtitle: "DATASCI 506"
+format:
+  html:
+    embed-resources: true
+    html-math-method: mathml
+    toc: true
+    code-fold: false
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(broom)
+library(infer)
+library(knitr)
+library(scales)
+library(slider)
+library(tidyverse)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title.position = "plot",
+      plot.caption.position = "plot",
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom"
+    )
+)
+```
+
+# Problem 1: Tidyverse — New Zealand
+
+The `nzge` data were supplied as an RDS file because the original `nzelect`
+package has been archived. Candidate and Party votes are kept separate in all
+calculations.
+
+```{r}
+nzge <- readRDS("data/nzge.rds") |>
+  as_tibble()
+
+glimpse(nzge)
+```
+
+## 1(a) Vote count by year and vote type
+
+```{r}
+votes_by_year_type <- nzge |>
+  summarise(
+    vote_count = sum(votes, na.rm = TRUE),
+    .by = c(election_year, voting_type)
+  ) |>
+  arrange(desc(vote_count))
+
+votes_by_year_type |>
+  mutate(vote_count = comma(vote_count)) |>
+  kable(
+    col.names = c("Election year", "Vote type", "Vote count"),
+    caption = "New Zealand votes by election year and vote type"
+  )
+```
+
+The largest total is the 2014 Party vote with
+`r comma(votes_by_year_type$vote_count[1])` votes. In every election year, the
+Party-vote total is slightly larger than the Candidate-vote total.
+
+## 1(b) Party shares of the 2014 Candidate vote
+
+```{r}
+candidate_2014 <- nzge |>
+  filter(
+    election_year == 2014,
+    voting_type == "Candidate"
+  ) |>
+  summarise(
+    votes = sum(votes, na.rm = TRUE),
+    .by = party
+  ) |>
+  mutate(proportion = votes / sum(votes)) |>
+  arrange(desc(proportion))
+
+candidate_2014 |>
+  mutate(
+    votes = comma(votes),
+    proportion = percent(proportion, accuracy = 0.01)
+  ) |>
+  kable(
+    col.names = c("Party/category", "Votes", "Share of Candidate vote"),
+    caption = "2014 Candidate-vote shares"
+  )
+```
+
+The National Party received the largest share of the 2014 Candidate vote:
+`r percent(candidate_2014$proportion[1], accuracy = 0.1)`. Labour was second
+with `r percent(candidate_2014$proportion[2], accuracy = 0.1)`. The source data
+place informal candidate ballots in the `party` field, so that category is
+shown explicitly and remains in the denominator.
+
+## 1(c) Winning party by year and vote type
+
+```{r}
+winning_parties <- nzge |>
+  summarise(
+    votes = sum(votes, na.rm = TRUE),
+    .by = c(election_year, voting_type, party)
+  ) |>
+  slice_max(
+    order_by = votes,
+    n = 1,
+    with_ties = TRUE,
+    by = c(election_year, voting_type)
+  ) |>
+  select(election_year, voting_type, party) |>
+  pivot_wider(
+    names_from = voting_type,
+    values_from = party,
+    names_glue = "{voting_type}_vote_winner"
+  ) |>
+  arrange(election_year)
+
+winning_parties |>
+  kable(
+    col.names = c("Election year", "Candidate-vote winner",
+                  "Party-vote winner"),
+    caption = "Winning party for each vote type"
+  )
+```
+
+Labour won both vote types in 2002. In 2005, National won the Candidate vote
+while Labour won the Party vote. National won both vote types in 2008, 2011,
+and 2014.
+
+# Problem 2: Tidyverse — Tennis
+
+The 2019 ATP match data come from the assigned
+[Tennis Abstract repository](https://github.com/azhou5849/tennis-atp-sackmann-data/tree/master).
+Each row is one match; the file contains separate winner and loser columns.
+
+```{r}
+matches <- read_csv(
+  "data/atp_matches_2019.csv",
+  show_col_types = FALSE
+)
+
+matches |>
+  select(
+    tourney_id, tourney_name, tourney_date, round,
+    winner_name, loser_name, w_ace, l_ace
+  ) |>
+  slice_head(n = 8)
+```
+
+## 2(a) Number of tournaments
+
+```{r}
+tournament_count <- matches |>
+  summarise(tournaments = n_distinct(tourney_id))
+
+tournament_count |>
+  kable(caption = "Number of distinct tournament/event IDs in 2019")
+```
+
+There are `r tournament_count$tournaments` distinct tournament/event IDs in
+the file. This count includes Davis Cup ties, which each have their own event
+ID in the source data.
+
+## 2(b) Players winning multiple tournaments
+
+A tournament champion is identified as the winner of a match whose round is
+coded `F` (final).
+
+```{r}
+tournament_titles <- matches |>
+  filter(round == "F") |>
+  count(winner_name, name = "tournaments_won", sort = TRUE)
+
+multiple_title_winners <- tournament_titles |>
+  filter(tournaments_won > 1)
+
+multiple_title_winners |>
+  kable(
+    col.names = c("Player", "Tournaments won"),
+    caption = "Players who won more than one tournament"
+  )
+```
+
+Yes. `r nrow(multiple_title_winners)` players won more than one tournament.
+The maximum was `r max(tournament_titles$tournaments_won)` titles, shared by
+`r str_c(tournament_titles |> filter(tournaments_won == max(tournaments_won)) |> pull(winner_name), collapse = " and ")`.
+
+## 2(c) Do winners have more aces?
+
+Because both ace totals come from the same match, I analyze the within-match
+difference, winner aces minus loser aces. Matches missing either ace count are
+excluded.
+
+```{r}
+ace_differences <- matches |>
+  filter(!is.na(w_ace), !is.na(l_ace)) |>
+  transmute(ace_difference = w_ace - l_ace)
+
+ace_summary <- ace_differences |>
+  summarise(
+    matches = n(),
+    mean_difference = mean(ace_difference),
+    median_difference = median(ace_difference),
+    winner_had_more = mean(ace_difference > 0)
+  )
+
+ace_summary |>
+  mutate(winner_had_more = percent(winner_had_more, accuracy = 0.1)) |>
+  kable(
+    digits = 2,
+    col.names = c("Complete matches", "Mean difference",
+                  "Median difference", "Winner had more aces"),
+    caption = "Within-match ace comparison"
+  )
+```
+
+I use a one-sided, simulation-based test from the `infer` package. The null
+hypothesis is that the population mean difference is zero, against the
+alternative that it is positive. This keeps the inferential workflow in the
+tidyverse rather than calling a base-R hypothesis-test function.
+
+```{r}
+set.seed(506)
+
+observed_ace_mean <- ace_differences |>
+  specify(response = ace_difference) |>
+  calculate(stat = "mean")
+
+null_ace_distribution <- ace_differences |>
+  specify(response = ace_difference) |>
+  hypothesize(null = "point", mu = 0) |>
+  generate(reps = 9999, type = "bootstrap") |>
+  calculate(stat = "mean")
+
+ace_test <- null_ace_distribution |>
+  summarise(
+    p_value =
+      (sum(stat >= observed_ace_mean$stat) + 1) / (n() + 1)
+  )
+
+tibble(
+  observed_mean_difference = observed_ace_mean$stat,
+  simulation_p_value = ace_test$p_value
+) |>
+  kable(
+    digits = 4,
+    col.names = c("Observed mean difference", "One-sided p-value"),
+    caption = "Simulation-based test of winner-minus-loser aces"
+  )
+```
+
+Winners averaged `r round(observed_ace_mean$stat, 2)` more aces per match.
+The one-sided simulation p-value is
+`r format.pval(ace_test$p_value, digits = 3, eps = 0.001)`. This is strong
+evidence that winners have more aces than losers on average. This is an
+association within completed matches; it does not establish that aces alone
+cause a player to win.
+
+## 2(d) Highest win rate, minimum five matches
+
+I reshape winners and losers into a common player column, mark each outcome,
+and then calculate wins divided by total matches.
+
+```{r}
+player_records <- bind_rows(
+  matches |>
+    transmute(player = winner_name, won = 1L),
+  matches |>
+    transmute(player = loser_name, won = 0L)
+) |>
+  summarise(
+    matches = n(),
+    wins = sum(won),
+    losses = matches - wins,
+    win_rate = mean(won),
+    .by = player
+  ) |>
+  filter(matches >= 5) |>
+  arrange(desc(win_rate), desc(matches))
+
+highest_win_rate <- player_records |>
+  slice_max(win_rate, n = 1, with_ties = TRUE)
+
+highest_win_rate |>
+  mutate(win_rate = percent(win_rate, accuracy = 0.1)) |>
+  kable(
+    col.names = c("Player", "Matches", "Wins", "Losses", "Win rate"),
+    caption = "Highest 2019 win rate among players with at least five matches"
+  )
+```
+
+Rafael Nadal had the highest win rate: 60 wins in 69 matches, or
+`r percent(highest_win_rate$win_rate, accuracy = 0.1)`.
+
+# Problem 3: Visualization — US COVID-19 cases
+
+The data are the assigned
+[New York Times state-level rolling averages](https://raw.githubusercontent.com/nytimes/covid-19-data/refs/heads/master/rolling-averages/us-states.csv).
+The source already supplies seven-day average daily cases and rates per
+100,000 population.
+
+```{r}
+covid <- read_csv("data/us-states.csv", show_col_types = FALSE)
+```
+
+## 3(a) Major and minor spikes
+
+To make “spike” reproducible, I define a peak as a local maximum within a
+plus-or-minus 28-day window, after summing the state seven-day averages. Peaks
+below 25,000 cases per day are omitted as small fluctuations. A retained peak
+is called major when it reaches at least 150,000 daily cases and minor
+otherwise.
+
+```{r}
+national_cases <- covid |>
+  summarise(
+    cases_avg = sum(cases_avg, na.rm = TRUE),
+    .by = date
+  ) |>
+  arrange(date) |>
+  mutate(
+    local_window_max = slide_dbl(
+      cases_avg,
+      max,
+      .before = 28,
+      .after = 28,
+      .complete = TRUE
+    )
+  )
+
+case_peaks <- national_cases |>
+  filter(
+    cases_avg == local_window_max,
+    cases_avg >= 25000
+  ) |>
+  mutate(
+    spike_type = if_else(cases_avg >= 150000, "Major", "Minor"),
+    label = str_c(format(date, "%b %Y"), "\n", comma(round(cases_avg)))
+  )
+
+spike_counts <- case_peaks |>
+  count(spike_type, name = "number_of_spikes")
+
+spike_counts |>
+  kable(
+    col.names = c("Spike classification", "Number of spikes"),
+    caption = "Detected national COVID-19 case spikes"
+  )
+```
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6.5
+ggplot(national_cases, aes(date, cases_avg)) +
+  geom_area(fill = "#9ecae1", alpha = 0.65) +
+  geom_line(color = "#08519c", linewidth = 0.55) +
+  geom_point(
+    data = case_peaks,
+    aes(color = spike_type),
+    size = 3
+  ) +
+  geom_label(
+    data = case_peaks,
+    aes(label = label, color = spike_type),
+    size = 2.7,
+    linewidth = 0.15,
+    fill = "white",
+    nudge_y = 36000,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = c(Major = "#b2182b", Minor = "#ef8a62")) +
+  scale_x_date(date_breaks = "3 months", date_labels = "%b\n%Y") +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  coord_cartesian(clip = "off") +
+  labs(
+    title = "Eight distinct US COVID-19 case spikes",
+    subtitle = "Three peaks meet the ≥150,000 major-spike threshold; five are minor",
+    x = NULL,
+    y = "Seven-day average daily cases",
+    color = "Spike type",
+    caption = "Source: The New York Times COVID-19 data; local maxima use a ±28-day window."
+  )
+```
+
+Under this definition, there are
+`r spike_counts |> filter(spike_type == "Major") |> pull(number_of_spikes)`
+major spikes and
+`r spike_counts |> filter(spike_type == "Minor") |> pull(number_of_spikes)`
+minor spikes. The January 2022 Omicron peak is visually exceptional at more
+than 800,000 average daily cases, over three times the next-largest peak.
+
+## 3(b) Highest- and lowest-rate states
+
+I restrict “states” to the 50 states plus the District of Columbia. Summing
+the daily `cases_avg_per_100k` values across the full period gives an
+approximately cumulative, population-standardized rate and permits a fair
+ranking across states of different sizes.
+
+```{r}
+states_50_dc <- c(state.name, "District of Columbia")
+
+overall_state_rates <- covid |>
+  filter(state %in% states_50_dc) |>
+  summarise(
+    overall_rate = sum(cases_avg_per_100k, na.rm = TRUE),
+    .by = state
+  ) |>
+  arrange(desc(overall_rate))
+
+extreme_states <- bind_rows(
+  overall_state_rates |> slice_head(n = 1) |> mutate(rank = "Highest"),
+  overall_state_rates |> slice_tail(n = 1) |> mutate(rank = "Lowest")
+)
+
+extreme_states |>
+  mutate(overall_rate = comma(overall_rate, accuracy = 1)) |>
+  select(rank, state, overall_rate) |>
+  kable(
+    col.names = c("Overall-rate rank", "State",
+                  "Summed daily rate per 100,000"),
+    caption = "States at the extremes of the overall population-standardized rate"
+  )
+```
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+extreme_trajectories <- covid |>
+  filter(state %in% extreme_states$state)
+
+ggplot(
+  extreme_trajectories,
+  aes(date, cases_avg_per_100k, color = state)
+) +
+  geom_line(linewidth = 0.8, alpha = 0.9) +
+  scale_color_manual(values = c("Maine" = "#2c7fb8", "Rhode Island" = "#d7301f")) +
+  scale_x_date(date_breaks = "3 months", date_labels = "%b\n%Y") +
+  scale_y_continuous(labels = label_number()) +
+  labs(
+    title = "Rhode Island's waves were far sharper than Maine's",
+    subtitle = "Daily new cases per 100,000 residents, seven-day average",
+    x = NULL,
+    y = "Cases per 100,000",
+    color = NULL,
+    caption = "Source: The New York Times COVID-19 data."
+  )
+```
+
+Rhode Island has the highest overall standardized rate, while Maine has the
+lowest. Rhode Island experienced much larger winter surges, especially the
+Omicron wave, which peaked above 500 cases per 100,000 per day. Maine's curve
+was lower and flatter early in the pandemic, and its recorded peak was only
+about 81 per 100,000. The gap is therefore driven not just by one date but by
+repeatedly higher and sharper Rhode Island waves.
+
+## 3(c) First five states substantially affected
+
+I define “substantial” as the first date a state's seven-day average reached
+5 new daily cases per 100,000. This threshold is high enough to avoid labeling
+isolated initial cases as sustained community spread. Territories are excluded
+using the same 50-state-plus-DC definition.
+
+```{r}
+first_substantial_dates <- covid |>
+  filter(
+    state %in% states_50_dc,
+    cases_avg_per_100k >= 5
+  ) |>
+  summarise(
+    first_substantial = min(date),
+    .by = state
+  ) |>
+  arrange(first_substantial) |>
+  slice_head(n = 5)
+
+first_substantial_dates |>
+  kable(
+    col.names = c("State", "First date at or above 5 per 100,000"),
+    caption = "First five states to cross the substantial-spread threshold"
+  )
+```
+
+```{r}
+#| fig-width: 11
+#| fig-height: 8
+early_trajectories <- covid |>
+  filter(
+    state %in% first_substantial_dates$state,
+    between(date, as.Date("2020-03-01"), as.Date("2020-05-31"))
+  )
+
+ggplot(early_trajectories, aes(date, cases_avg_per_100k)) +
+  geom_hline(yintercept = 5, color = "#636363", linetype = "dashed") +
+  geom_line(color = "#2b8cbe", linewidth = 0.85) +
+  geom_vline(
+    data = first_substantial_dates,
+    aes(xintercept = first_substantial),
+    color = "#d7301f",
+    linewidth = 0.7
+  ) +
+  geom_point(
+    data = first_substantial_dates,
+    aes(x = first_substantial, y = 5),
+    color = "#d7301f",
+    size = 2.5
+  ) +
+  facet_wrap(~ state, scales = "free_y") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %d") +
+  labs(
+    title = "The Northeast led the first wave of substantial state-level spread",
+    subtitle = "Red markers show the first date the 7-day average reached 5 cases per 100,000",
+    x = NULL,
+    y = "Daily cases per 100,000",
+    caption = "Source: The New York Times COVID-19 data. Scales vary by panel to reveal timing."
+  ) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+```
+
+The first five states were New York (March 21), New Jersey (March 24),
+Louisiana (March 26), Massachusetts (March 27), and Michigan (March 28).
+Four of the five are in the Northeast/Midwest corridor, supporting the argument
+that the first large US wave was geographically concentrated there, with
+Louisiana as the notable early Southern exception.
+
+# Sources
+
+- `nzge.rds`, supplied by the course at <https://phuongov.github.io/stats506-f26/data_f26/nzge.rds>.
+- Jeff Sackmann/Tennis Abstract, [2019 ATP match data](https://github.com/azhou5849/tennis-atp-sackmann-data/tree/master).
+- The New York Times, [US state COVID-19 rolling averages](https://raw.githubusercontent.com/nytimes/covid-19-data/refs/heads/master/rolling-averages/us-states.csv).
